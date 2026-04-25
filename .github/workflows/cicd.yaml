@@ -107,7 +107,7 @@ jobs:
             # Note: If you need GPU access, add --gpus all
             docker run -d \
               --name ${{ env.CONTAINER_NAME }} \
-              -p 80:80 \
+              -p 8080:8080 \
               ${{ steps.build-image.outputs.full_image }}
             
             # 5. Optional: Clean up old images to save space
