@@ -33,10 +33,9 @@ on:
 env:
   AWS_REGION: eu-north-1
   ECR_REPOSITORY: ml-cicd
-  # New variables for EC2
-  EC2_HOST: ${{ secrets.EC2_HOST }}        # Your EC2 Public IP or DNS
-  EC2_USER: ubuntu                         # Usually 'ubuntu' or 'ec2-user'
-  CONTAINER_NAME: wine-detection-container   # Name of the container in your task definition
+  EC2_HOST: ${{ secrets.EC2_HOST }}
+  EC2_USER: ubuntu
+  CONTAINER_NAME: wine-detection-container
 
 permissions:
   contents: read
@@ -52,9 +51,13 @@ jobs:
         run: echo "Running ML integration tests..."
 
   push-to-ecr:
-    name: Deploy to EC2
+    name: Build and Push to ECR
     needs: integration
     runs-on: ubuntu-latest
+    # We define outputs here so the next job can see the image name
+    outputs:
+      full_image: ${{ steps.build-image.outputs.full_image }}
+      registry: ${{ steps.login-ecr.outputs.registry }}
     
     steps:
     - name: Checkout
@@ -80,35 +83,40 @@ jobs:
         docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
         echo "full_image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
   deploy-to-ec2:
-    - name: Deploy to EC2
-      uses: appleboy/ssh-action@v1.0.3
-      with:
-        host: ${{ env.EC2_HOST }}
-        username: ${{ env.EC2_USER }}
-        key: ${{ secrets.EC2_SSH_KEY }}
-        # CRITICAL: We must pass these as arguments to the script
-        envs: IMAGE_NAME, REGISTRY, REGION
-      env:
-        IMAGE_NAME: ${{ steps.build-image.outputs.full_image }}
-        REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        REGION: ${{ env.AWS_REGION }}
-      script: |
-        # 1. Login to ECR (Now using the variables we passed)
-        aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $REGISTRY
-        
-        # 2. Stop and remove old container
-        docker stop wine-detection-container || true
-        docker rm wine-detection-container || true
-        
-        # 3. Pull the new image
-        docker pull $IMAGE_NAME
-        
-        # 4. Start the new container
-        docker run -d \
-          --name wine-detection-container \
-          -p 8080:8080 \
-          $IMAGE_NAME
-        
-        # 5. Cleanup
-        docker image prune -f
+    name: Deploy to EC2
+    needs: push-to-ecr
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH into EC2 and Deploy
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ env.EC2_HOST }}
+          username: ${{ env.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: IMAGE_NAME, REGISTRY, REGION
+        env:
+          # We grab these from the 'needs' job outputs
+          IMAGE_NAME: ${{ needs.push-to-ecr.outputs.full_image }}
+          REGISTRY: ${{ needs.push-to-ecr.outputs.registry }}
+          REGION: ${{ env.AWS_REGION }}
+        script: |
+          # 1. Login to ECR
+          aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $REGISTRY
+          
+          # 2. Stop and remove old container
+          docker stop wine-detection-container || true
+          docker rm wine-detection-container || true
+          
+          # 3. Pull the new image
+          docker pull $IMAGE_NAME
+          
+          # 4. Start the new container
+          docker run -d \
+            --name wine-detection-container \
+            -p 8080:8080 \
+            $IMAGE_NAME
+          
+          # 5. Cleanup
+          docker image prune -f
